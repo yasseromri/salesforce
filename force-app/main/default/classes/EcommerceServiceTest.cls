@@ -78,7 +78,7 @@ private class EcommerceServiceTest {
         insert testCase;
 
         // Create a mock response for the eCommerce API call
-        String mockResponse = '{"totalSize": 1, "done": true, "records": [{"Id": "500Qy00000mVu8jIAC"}]}'; // Replace with valid response data
+        String mockResponse = '{"totalSize": 1, "done": true, "records": [{"Id": "003XXXXXXXXXXXXXXX"}]}'; // Replace with valid response data
 
         Test.setMock(HttpCalloutMock.class, new MockHttpResponseGenerator(mockResponse));
 

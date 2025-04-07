@@ -5,6 +5,4 @@
 // You can also execute the entire file by running the command:
 //     SFDX: Execute Anonymous Apex with Editor Contents
 
-string tempvar = 'Enter_your_name_here';
-System.debug('Hello World!');
-System.debug('My name is ' + tempvar);
+LIST <GDPR_Field_Cleanup__mdt> L =[SELECT Field_API_Name__c, Anonymization_Type__c FROM GDPR_Field_Cleanup__mdt];
