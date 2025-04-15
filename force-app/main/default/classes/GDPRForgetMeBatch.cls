@@ -1,8 +1,8 @@
 global class GDPRForgetMeBatch implements Database.Batchable<SObject>, Database.Stateful {
-    private static final String MASK_VALUE = 'GGG';
+    private static final String MASK_VALUE = 'ff';
     private Map<String, List<GDPR_Field_Cleanup__mdt>> metadataByObject;
     private List<String> objectNames;
-    private Integer currentObjectIndex;
+    public Integer currentObjectIndex;
 
     public GDPRForgetMeBatch() {
         metadataByObject = new Map<String, List<GDPR_Field_Cleanup__mdt>>();
@@ -15,8 +15,6 @@ global class GDPRForgetMeBatch implements Database.Batchable<SObject>, Database.
             }
             metadataByObject.get(meta.Object_Name__c).add(meta);
         }
-        System.debug('Metadata by Object: ' + metadataByObject);
-
         objectNames = new List<String>(metadataByObject.keySet());
         currentObjectIndex = 0;
     }
@@ -26,16 +24,16 @@ global class GDPRForgetMeBatch implements Database.Batchable<SObject>, Database.
             String objectName = objectNames[currentObjectIndex];
             String query;
 
-            if (objectName == 'Contact') {
-                query = 'SELECT Id, IndividualId FROM Contact WHERE Individual.ShouldForget = TRUE';
-            } else {
-                query = 'SELECT Id, IndividualId__c, IndividualId__r.ShouldForget FROM ' + objectName + 
-                        ' WHERE IndividualId__r.ShouldForget = TRUE';
-            }
-            System.debug('Query for ' + objectName + ': ' + query);
+            
+                query = 'SELECT Id FROM ' + objectName +
+                        ' WHERE ContactId IN ( SELECT Id  FROM Contact WHERE Individual.ShouldForget = true)';
+            
+
             return Database.getQueryLocator(query);
         }
-        return Database.getQueryLocator('SELECT Id FROM Account WHERE Id = null'); // Dummy query
+
+        // Dummy query to satisfy method signature
+        return Database.getQueryLocator('SELECT Id FROM Account WHERE Id = null');
     }
 
     global void execute(Database.BatchableContext batchContext, List<SObject> recordList) {
@@ -44,52 +42,53 @@ global class GDPRForgetMeBatch implements Database.Batchable<SObject>, Database.
         }
 
         String objectName = objectNames[currentObjectIndex];
-        Map<String, List<SObject>> recordsByObject = new Map<String, List<SObject>>();
-        recordsByObject.put(objectName, recordList);
-
-        // Debugging: Check if we're processing the Contact object
-        System.debug('Processing Object: ' + objectName);
         List<GDPR_Field_Cleanup__mdt> metadataList = metadataByObject.get(objectName);
+        List<SObject> toUpdate = new List<SObject>();
+
         if (metadataList != null) {
             for (SObject record : recordList) {
+                Boolean updated = false;
+
                 for (GDPR_Field_Cleanup__mdt meta : metadataList) {
-                    anonymizeField(record, meta);
+                    Boolean changed = anonymizeField(record, meta);
+                    if (changed) updated = true;
+                }
+
+                if (updated) {
+                    toUpdate.add(record);
                 }
             }
-            update recordList;
-        } else {
-            System.debug('No metadata found for object: ' + objectName);
+
+            if (!toUpdate.isEmpty()) {
+                update toUpdate;
+            }
         }
 
-        // Move to the next object
         currentObjectIndex++;
     }
 
-    private void anonymizeField(SObject record, GDPR_Field_Cleanup__mdt meta) {
+    private Boolean anonymizeField(SObject record, GDPR_Field_Cleanup__mdt meta) {
         try {
             if (meta.Anonymization_Type__c == 'Mask') {
-                record.put(meta.Field_API_Name__c, MASK_VALUE); // Masking
-                System.debug('Masked field: ' + meta.Field_API_Name__c + ' with value: ' + MASK_VALUE);
-            } else if (meta.Anonymization_Type__c == 'Null') {                
-                    record.put(meta.Field_API_Name__c, ''); // Nullifying
-                    System.debug('Nullified field: ' + meta.Field_API_Name__c);
-               
+                record.put(meta.Field_API_Name__c, MASK_VALUE);
+                return true;
+            } else if (meta.Anonymization_Type__c == 'Null' || meta.Anonymization_Type__c == 'Delete') {
+                record.put(meta.Field_API_Name__c, null);
+                return true;
             }
         } catch (Exception e) {
             System.debug('Error anonymizing field: ' + meta.Field_API_Name__c + ' - ' + e.getMessage());
         }
+        return false;
     }
 
     global void finish(Database.BatchableContext batchContext) {
-    if (currentObjectIndex + 1 < objectNames.size()) {
-        System.debug('Starting batch for next object: ' + objectNames[currentObjectIndex + 1]);
-        
-        // Start a new batch for the next object
-        GDPRForgetMeBatch nextBatch = new GDPRForgetMeBatch();
-        nextBatch.currentObjectIndex = this.currentObjectIndex + 1; // Move to the next object
-        Database.executeBatch(nextBatch);
-    } else {
-        System.debug('GDPR Forget Me Batch Completed for all objects.');
+        if (currentObjectIndex + 1 < objectNames.size()) {
+            GDPRForgetMeBatch nextBatch = new GDPRForgetMeBatch();
+            nextBatch.currentObjectIndex = this.currentObjectIndex + 1;
+            Database.executeBatch(nextBatch);
+        } else {
+            System.debug('GDPR Forget Me Batch Completed for all objects.');
+        }
     }
-}
 }

@@ -1,4 +1,4 @@
-public with sharing class AccountDao implements accountInter {
+public with sharing class AccountDao {
     public Account getById(Id id) {
         if (!Schema.sObjectType.Account.isAccessible()) {
             throw new System.SecurityException('You do not have permission to access Account records.');

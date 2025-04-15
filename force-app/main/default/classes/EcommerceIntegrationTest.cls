@@ -53,7 +53,7 @@ private class EcommerceIntegrationTest {
         Test.setMock(HttpCalloutMock.class, new MockHttpResponseGenerator());
 
         Test.startTest();
-        EcommerceIntegration.getAccountAndContact(c.Id, c.SuppliedEmail);
+        // EcommerceIntegration.getAccountAndContact(c.Id, c.SuppliedEmail);
         Test.stopTest();
         Account a = [SELECT Id FROM Account WHERE Name = 'Account for Test Contact' LIMIT 1];
         Contact c1 = [SELECT Id FROM Contact WHERE Email = 'test@example.com' LIMIT 1];

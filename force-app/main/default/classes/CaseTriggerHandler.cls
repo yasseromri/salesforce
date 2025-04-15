@@ -22,7 +22,7 @@ public class CaseTriggerHandler extends TriggerHandler {
                 Case c = newCases[i];
                 if (c.SuppliedEmail != null) {
                     // Call EcommerceIntegration with the correct Case ID and Email
-                    EcommerceIntegration.getAccountAndContact(c.Id, c.SuppliedEmail);
+                    // EcommerceIntegration.getAccountAndContact(c.Id, c.SuppliedEmail);
                 }
             }
         }

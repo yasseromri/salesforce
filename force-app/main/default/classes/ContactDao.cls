@@ -1,4 +1,4 @@
-public with sharing class ContactDao implements Dao {
+public with sharing class ContactDao  {
     public Contact getById(Id id) {
         if (!Schema.sObjectType.Contact.isAccessible()) {
             throw new System.SecurityException('You do not have permission to access Contact records.');
