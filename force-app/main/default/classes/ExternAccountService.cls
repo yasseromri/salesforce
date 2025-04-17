@@ -1,4 +1,4 @@
-public class ExternAccountService {
+public class ExternAccountService implements ICustomerService {
 
     // Re-use authentication URL
     private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
@@ -93,7 +93,7 @@ public class ExternAccountService {
      */
     public String queryAccountIdByname(String name, String accessToken) {
         // Construct the SOQL query, ensuring the accountNumber is properly encoded for the URL
-        String soql = 'SELECT+Id+FROM+Account+WHERE+Name=\'' + EncodingUtil.urlEncode(name, 'UTF-8') + '\'+LIMIT+1';
+        String soql = 'SELECT+Id+FROM+Account+WHERE+PersonEmail=\'' + EncodingUtil.urlEncode(name, 'UTF-8') + '\'+LIMIT+1';
         String endpoint = QUERY_ENDPOINT + '?q=' + soql;
 
         HttpRequest req = new HttpRequest();
@@ -205,6 +205,8 @@ public class ExternAccountService {
             // Map fields from the external data map to the local Account record
             // Add/remove fields as needed based on your requirements
             accToUpsert.Name = (String) data.get('Name');
+            accToUpsert.LastName = (String) data.get('LastName');
+            accToUpsert.PersonEmail = (String) data.get('PersonEmail');
             accToUpsert.AccountNumber = (String) data.get('AccountNumber'); // Keep local AccountNumber in sync?
             accToUpsert.Phone = (String) data.get('Phone');
             accToUpsert.Website = (String) data.get('Website');

@@ -50,7 +50,11 @@
 // }
 
 
-string externalOrderId = 'new';
-ExternAccountService e = new ExternAccountService();
+// string externalOrderId = 'new';
+// ExternAccountService e = new ExternAccountService();
 
-e.syncAccountByAccountNumber(externalOrderId);
+// e.syncAccountByAccountNumber(externalOrderId);
+EcommerceService e = new EcommerceService();
+ string email = 'omriyasser12@gmail.com';
+ string caseId = '500Qy00000pO3sKIAS';
+e.getAccountAndContact(caseId, email);

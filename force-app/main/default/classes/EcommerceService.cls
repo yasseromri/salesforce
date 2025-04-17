@@ -1,10 +1,9 @@
-public with sharing class EcommerceService implements EcommerceInterface {
+public with sharing class EcommerceService implements ICustomerService {
     private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
     private static final String ENDPOINT_QUERY = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com/services/data/v63.0/query';
-    private static final String ENDPOINT_SOBJECT = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com/services/data/v47.0/sobjects/Contact/';
+    private static final String ENDPOINT_SOBJECT = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com/services/data/v47.0/sobjects/Account/';
 
-    private static AccountDao accountDao = new AccountDao();
-    private static ContactDao contactDao = new ContactDao();
+    
 
     public void getAccountAndContact(Id caseId, String email) {
         try {
@@ -50,7 +49,7 @@ public with sharing class EcommerceService implements EcommerceInterface {
     }
 
     public void callEcommerceApi(Id caseId, String email, String accessToken) {
-        String query = 'SELECT+Id+FROM+Contact+WHERE+Email=\'' + EncodingUtil.urlEncode(email, 'UTF-8') + '\'';
+        String query = 'SELECT+Id+FROM+Account+WHERE+PersonEmail=\'' + EncodingUtil.urlEncode(email, 'UTF-8') + '\'';
         String endpoint = ENDPOINT_QUERY + '?q=' + query;
 
         HttpRequest request = new HttpRequest();
@@ -109,47 +108,67 @@ public with sharing class EcommerceService implements EcommerceInterface {
 
     public void upsertAccountAndContact(Id caseId, Map<String, Object> data) {
         try {
-            Account acc = new Account();
-            String contactName = (String) data.get('Name');
-            acc.Name = contactName != null ? 'Account for ' + contactName : 'Account for (no name)';
-            accountDao.save(acc);
-
             String externalId = (String) data.get('Id');
-            List<Contact> existingContacts = [SELECT Id, External_id__c FROM Contact WHERE External_id__c = :externalId LIMIT 1];
-            Contact con;
-            if (!existingContacts.isEmpty()) {
-                con = existingContacts[0];
-                con.LastName = (String) data.get('LastName');
-                con.FirstName = (String) data.get('FirstName');
-                con.Email = (String) data.get('Email');
-                con.Phone = (String) data.get('Phone');
-                con.AccountId = acc.Id;
-                contactDao.updateEntity(con);
-                System.debug('Contact updated ' + con);
+            // Consider renaming existingContacts to existingAccounts for clarity
+            List<Account> existingAccounts = [SELECT Id, External_id__c, PersonContactId // Query PersonContactId if needed
+                                              FROM Account
+                                              WHERE External_id__c = :externalId LIMIT 1];
+            Account acc; // Renamed 'con' to 'acc' for clarity (represents Account)
+            if (!existingAccounts.isEmpty()) {
+                acc = existingAccounts[0];
+                // Assuming Person Accounts: Update Person Account fields
+                // Note: You cannot directly set LastName/FirstName on existing Person Accounts via Apex DML easily after creation.
+                // You might need to update the associated Contact record if those fields need changing.
+                // For simplicity here, we'll focus on email/phone which are usually updatable.
+                acc.PersonEmail = (String) data.get('PersonEmail'); // Use PersonEmail for Person Accounts
+                acc.Phone = (String) data.get('Phone');
+                // Add other Account fields as needed
+
+                update acc;
+                System.debug('Person Account updated ' + acc);
             } else {
-                con = new Contact();
-                con.LastName = (String) data.get('LastName');
-                con.FirstName = (String) data.get('FirstName');
-                con.Email = (String) data.get('Email');
-                con.Phone = (String) data.get('Phone');
-                con.AccountId = acc.Id;
-                con.External_id__c = externalId;
-                contactDao.save(con);
-                System.debug('Contact inserted ' + con);
+                acc = new Account();
+                // Set required fields for Person Account creation (RecordTypeId might be needed depending on org setup)
+                // You MUST set LastName for Account creation, even for Person Accounts
+                acc.LastName = (String) data.get('LastName');
+                acc.FirstName = (String) data.get('FirstName'); // Required for Person Account creation
+                acc.PersonEmail = (String) data.get('PersonEmail');
+                acc.Phone = (String) data.get('Phone');
+                acc.External_id__c = externalId;
+                 // Add other Account fields as needed
+
+                insert acc;
+                System.debug('Person Account inserted ' + acc);
             }
 
+            // Now update the Case
             List<Case> caseList = [SELECT Id, AccountId, ContactId FROM Case WHERE Id = :caseId LIMIT 1];
             if (!caseList.isEmpty()) {
                 Case c = caseList[0];
+
+                // *** FIX: Assign the Account ID to the Case.AccountId field ***
                 c.AccountId = acc.Id;
-                c.ContactId = con.Id;
+
+                // Optional: If you also want to link the Contact associated with the Person Account
+                // You might need to query the PersonContactId if it wasn't included in the initial query
+                 Account updatedAcc = [SELECT Id FROM Account WHERE Id = :acc.Id];
+                 if (updatedAcc.PersonContactId != null) {
+                    c.ContactId = updatedAcc.PersonContactId;
+                 }
+                // OR if you queried it earlier:
+                // if (acc.PersonContactId != null) {
+                //     c.ContactId = acc.PersonContactId;
+                // }
+
+
                 update c;
                 System.debug('Updated Case: ' + c);
             } else {
                 System.debug('No Case found with Id: ' + caseId);
             }
         } catch (Exception e) {
-            System.debug('Error in upsertAccountAndContact: ' + e.getMessage());
+            // Log the full stack trace for better debugging
+            System.debug('Error in upsertAccountAndContact: ' + e.getMessage() + '\nStackTrace: ' + e.getStackTraceString());
             // Consider throwing a custom exception here to handle data processing failures.
         }
     }
