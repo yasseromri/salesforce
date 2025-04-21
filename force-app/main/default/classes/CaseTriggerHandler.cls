@@ -3,28 +3,21 @@ public class CaseTriggerHandler extends TriggerHandler {
     public override void afterInsert() {
         List<Case> newCases = (List<Case>) Trigger.new;
 
-        // Ensure list is not empty before processing
-        if (newCases.isEmpty()) {
-            return;
-        }
-
-        // Collect email addresses to avoid unnecessary API calls
-        List<String> emailList = new List<String>();
+        // Process each new case directly
         for (Case c : newCases) {
-            if (c.SuppliedEmail != null) {
-                emailList.add(c.SuppliedEmail);
+            // Check if the required email field is populated and not just whitespace
+            if (String.isNotBlank(c.SuppliedEmail)) {
+                // Call the future method to handle the integration logic asynchronously.
+                // Pass the specific Case ID and its email.
+                // This assumes EcommerceIntegration.getAccountAndContact is designed
+                // to handle one case at a time via a future call.
+                EcommerceIntegration.getAccountAndContact(c.Id, c.SuppliedEmail);
             }
-        }
-        
-        // Process the email list in batches
-        if (!emailList.isEmpty()) {
-            for (Integer i = 0; i < newCases.size(); i++) {
-                Case c = newCases[i];
-                if (c.SuppliedEmail != null) {
-                    // Call EcommerceIntegration with the correct Case ID and Email
-                    // EcommerceIntegration.getAccountAndContact(c.Id, c.SuppliedEmail);
-                }
-            }
+            // Optional: Add an else block here if you need to log or handle cases
+            // that *don't* have a SuppliedEmail.
+            // else {
+            //     System.debug('Case ' + c.Id + ' does not have a SuppliedEmail, skipping integration call.');
+            // }
         }
     }
 }

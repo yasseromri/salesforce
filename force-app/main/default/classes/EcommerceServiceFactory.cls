@@ -1,4 +1,4 @@
-public class EcommerceServiceFactory {  
+ public with sharing  class EcommerceServiceFactory {  
     private static Map<String, Object> serviceCache = new Map<String, Object>();
 
     public static Object getService(String serviceTypeName) {
@@ -103,10 +103,7 @@ public class EcommerceServiceFactory {
     // Custom Exception class remains the same
     public class EcommerceException extends Exception {}
 
-    // --- Interfaces (keep these defined outside the factory or in separate files) ---
-    // public interface EcommerceInterface { ... } // Example based on your other classes
+   
 
-    // --- Implementation Classes (keep these defined outside the factory or in separate files) ---
-    // public class EcommerceService implements EcommerceInterface { ... }
-    // public class ExternContacService { ... } // Note: This needs to implement the interface specified in MDT
+   
 }

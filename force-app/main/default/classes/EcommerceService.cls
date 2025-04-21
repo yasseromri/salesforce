@@ -148,13 +148,14 @@ public with sharing class EcommerceService implements ICustomerService {
 
                 // *** FIX: Assign the Account ID to the Case.AccountId field ***
                 c.AccountId = acc.Id;
+                c.ContactId = acc.PersonContactId;
 
                 // Optional: If you also want to link the Contact associated with the Person Account
                 // You might need to query the PersonContactId if it wasn't included in the initial query
-                 Account updatedAcc = [SELECT Id FROM Account WHERE Id = :acc.Id];
-                 if (updatedAcc.PersonContactId != null) {
-                    c.ContactId = updatedAcc.PersonContactId;
-                 }
+                //  Account updatedAcc = [SELECT Id FROM Account WHERE Id = :acc.Id];
+                //  if (updatedAcc.PersonContactId != null) {
+                //     c.ContactId = updatedAcc.PersonContactId;
+                //  }
                 // OR if you queried it earlier:
                 // if (acc.PersonContactId != null) {
                 //     c.ContactId = acc.PersonContactId;
