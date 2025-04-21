@@ -1,4 +1,4 @@
-public class ExternAccountService implements ICustomerService {
+public class ExternAccountService  {
 
     // Re-use authentication URL
     private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
