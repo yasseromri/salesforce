@@ -1,6 +1,6 @@
 public with sharing class OrderService implements IOrderService {
 
-    
+    // importan querry /services/data/v62.0/query?q=SELECT+Id+FROM+Order+WHERE+Account.Name='jihen+wijden'
     private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
     private static final String EXTERNAL_INSTANCE_URL = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com'; 
     private static final String API_VERSION = 'v63.0'; 
@@ -180,7 +180,12 @@ public with sharing class OrderService implements IOrderService {
 
         if (res != null && res.getStatusCode() == 200) {
             Map<String, Object> jsonResponse = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
-            return (List<Map<String, Object>>) jsonResponse.get('records'); 
+            List<Object> records = (List<Object>) jsonResponse.get('records');
+            List<Map<String, Object>> orderItems = new List<Map<String, Object>>();
+            for (Object record : records) {
+                orderItems.add((Map<String, Object>) record);
+            }
+            return orderItems;
         } else {
             System.debug('External Order Item query failed for Order ID ' + externalOrderId + '. Status: ' + (res != null ? String.valueOf(res.getStatusCode()) : 'No Response') + ' Body: ' + (res != null ? res.getBody() : 'N/A'));
             return null;
@@ -301,57 +306,69 @@ public with sharing class OrderService implements IOrderService {
      */
     private Map<String, Id> upsertProductsAndGetIds(Map<String, Map<String, Object>> externalProductDataMap) {
         Map<String, Id> localProductIds = new Map<String, Id>();
-        List<Product2> productsToUpsert = new List<Product2>();
-        Schema.SObjectField externalIdField = Product2.SObjectType.getDescribe().fields.getMap().get('External_Id__c');
 
+        Schema.SObjectField externalIdField = Product2.SObjectType.getDescribe().fields.getMap().get('External_Id__c');
         if(externalIdField == null){
             System.debug('Error: External_Id__c field missing on Product2.');
             return localProductIds; // Return empty map
         }
 
-        // Query existing products first
         Set<String> externalIds = externalProductDataMap.keySet();
-        Map<String, Id> existingProductMap = new Map<String, Id>();
+        Map<String, Product2> existingProductMap = new Map<String, Product2>();
         for(Product2 p : [SELECT Id, External_Id__c FROM Product2 WHERE External_Id__c IN :externalIds]) {
-            existingProductMap.put(p.External_Id__c, p.Id);
+            existingProductMap.put(p.External_Id__c, p);
             localProductIds.put(p.External_Id__c, p.Id); // Add existing to the final map
         }
 
+        List<Product2> productsToInsert = new List<Product2>();
+        List<Product2> productsToUpdate = new List<Product2>();
+
         for (String extId : externalProductDataMap.keySet()) {
             Map<String, Object> data = externalProductDataMap.get(extId);
-            Product2 prod = new Product2();
+            Product2 prod;
             if(existingProductMap.containsKey(extId)) {
-                prod.Id = existingProductMap.get(extId); // Prepare for update
+                prod = existingProductMap.get(extId);
+                // Update fields
+                prod.Name = (String) data.get('Name');
+                prod.ProductCode = (String) data.get('ProductCode');
+                prod.Description = (String) data.get('Description');
+                prod.IsActive = true;
+                productsToUpdate.add(prod);
             } else {
-                 prod.External_Id__c = extId; // Set external ID only on insert
+                prod = new Product2();
+                prod.External_Id__c = extId;
+                prod.Name = (String) data.get('Name');
+                prod.ProductCode = (String) data.get('ProductCode');
+                prod.Description = (String) data.get('Description');
+                prod.IsActive = true;
+                productsToInsert.add(prod);
             }
-
-            // Map fields - ADD MORE AS NEEDED
-            prod.Name = (String) data.get('Name');
-            prod.ProductCode = (String) data.get('ProductCode');
-            prod.Description = (String) data.get('Description');
-            prod.IsActive = true; // Assume active unless specified otherwise
-
-            productsToUpsert.add(prod);
         }
 
-        if (!productsToUpsert.isEmpty()) {
-            List<Database.UpsertResult> results = Database.upsert(productsToUpsert, externalIdField, false);
-            for (Integer i = 0; i < results.size(); i++) {
-                Database.UpsertResult res = results[i];
-                Product2 processedProd = productsToUpsert[i];
-String externalId = processedProd.External_Id__c != null ? processedProd.External_Id__c :
-                                    new List<String>(externalProductDataMap.keySet())[i]; // Fallback to get extId
-
-                if (res.isSuccess()) {
-                    localProductIds.put(externalId, res.getId()); // Add newly created/updated ID
-                     System.debug((res.isCreated() ? 'Inserted' : 'Updated') + ' Product2: ' + res.getId() + ' for External ID: ' + externalId);
+        if (!productsToInsert.isEmpty()) {
+            Database.SaveResult[] insertResults = Database.insert(productsToInsert, false);
+            for (Integer i = 0; i < insertResults.size(); i++) {
+                if (insertResults[i].isSuccess()) {
+                    localProductIds.put(productsToInsert[i].External_Id__c, insertResults[i].getId());
+                    System.debug('Inserted Product2: ' + insertResults[i].getId() + ' for External ID: ' + productsToInsert[i].External_Id__c);
                 } else {
-                    System.debug('Product2 upsert failed for external ID ' + externalId + ': ' + res.getErrors()[0].getMessage());
-                    // Decide if we should remove from localProductIds map?
+                    System.debug('Product2 insert failed for external ID ' + productsToInsert[i].External_Id__c + ': ' + insertResults[i].getErrors()[0].getMessage());
                 }
             }
         }
+
+        if (!productsToUpdate.isEmpty()) {
+            Database.SaveResult[] updateResults = Database.update(productsToUpdate, false);
+            for (Integer i = 0; i < updateResults.size(); i++) {
+                if (updateResults[i].isSuccess()) {
+                    localProductIds.put(productsToUpdate[i].External_Id__c, updateResults[i].getId());
+                    System.debug('Updated Product2: ' + updateResults[i].getId() + ' for External ID: ' + productsToUpdate[i].External_Id__c);
+                } else {
+                    System.debug('Product2 update failed for external ID ' + productsToUpdate[i].External_Id__c + ': ' + updateResults[i].getErrors()[0].getMessage());
+                }
+            }
+        }
+
         return localProductIds;
     }
 //ENA WSILIT HOUNI 
@@ -445,123 +462,152 @@ String externalId = processedProd.External_Id__c != null ? processedProd.Externa
             return;
         }
 
-        Schema.SObjectField orderExternalIdField = Order.SObjectType.getDescribe().fields.getMap().get('External_Id__c');
-        Schema.SObjectField itemExternalIdField = OrderItem.SObjectType.getDescribe().fields.getMap().get('External_Id__c');
+        List<Order> ordersToInsert = new List<Order>();
+        List<Order> ordersToUpdate = new List<Order>();
+        List<OrderItem> itemsToInsert = new List<OrderItem>();
+        List<OrderItem> itemsToUpdate = new List<OrderItem>();
 
-        if(orderExternalIdField == null || itemExternalIdField == null){
-            System.debug('Error: External_Id__c field missing on Order or OrderItem.');
+        // Query existing Order by External_Id__c
+        List<Order> existingOrders = [SELECT Id, External_Id__c FROM Order WHERE External_Id__c = :externalOrderId LIMIT 1];
+        Order orderToProcess;
+        if (!existingOrders.isEmpty()) {
+            orderToProcess = existingOrders[0];
+            // Update fields
+            orderToProcess.AccountId = localAccountId;
+            orderToProcess.ContractId = localContractId;
+            orderToProcess.Pricebook2Id = Test.isRunningTest() ? Test.getStandardPricebookId() : [SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1].Id;
+            orderToProcess.Status = (String) externalOrderData.get('Status');
+            orderToProcess.EffectiveDate = Date.valueOf(((String)externalOrderData.get('EffectiveDate')).substring(0,10));
+            ordersToUpdate.add(orderToProcess);
+        } else {
+            orderToProcess = new Order();
+            orderToProcess.External_Id__c = externalOrderId;
+            orderToProcess.AccountId = localAccountId;
+            orderToProcess.ContractId = localContractId;
+            orderToProcess.Pricebook2Id = Test.isRunningTest() ? Test.getStandardPricebookId() : [SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1].Id;
+            orderToProcess.Status = (String) externalOrderData.get('Status');
+            orderToProcess.EffectiveDate = Date.valueOf(((String)externalOrderData.get('EffectiveDate')).substring(0,10));
+            ordersToInsert.add(orderToProcess);
+        }
+
+        Id localOrderId = null;
+        if (!ordersToInsert.isEmpty()) {
+            Database.SaveResult[] insertResults = Database.insert(ordersToInsert, false);
+            if (insertResults[0].isSuccess()) {
+                localOrderId = insertResults[0].getId();
+                System.debug('Inserted Order: ' + localOrderId);
+            } else {
+                System.debug('Order insert failed for external ID ' + externalOrderId + ': ' + insertResults[0].getErrors()[0].getMessage());
+                return;
+            }
+        } else if (!ordersToUpdate.isEmpty()) {
+            Database.SaveResult[] updateResults = Database.update(ordersToUpdate, false);
+            if (updateResults[0].isSuccess()) {
+                localOrderId = updateResults[0].getId();
+                System.debug('Updated Order: ' + localOrderId);
+            } else {
+                System.debug('Order update failed for external ID ' + externalOrderId + ': ' + updateResults[0].getErrors()[0].getMessage());
+                return;
+            }
+        }
+
+        if (localOrderId == null) {
+            System.debug('Failed to get local Order Id after insert/update.');
             return;
         }
 
-        Id standardPricebookId = Test.isRunningTest() ? Test.getStandardPricebookId() : [SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1].Id;
-        if (standardPricebookId == null) {
-             System.debug('Standard Pricebook ID not found. Cannot upsert Order/Items.');
-             return;
-        }
-
-        // 1. Upsert Order Header
-        List<Order> existingOrders = [SELECT Id FROM Order WHERE External_Id__c = :externalOrderId LIMIT 1];
-        Order orderToUpsert = !existingOrders.isEmpty() ? new Order(Id = existingOrders[0].Id) : new Order();
-
-        orderToUpsert.External_Id__c = externalOrderId; // Set on insert
-        orderToUpsert.AccountId = localAccountId;
-        orderToUpsert.ContractId = localContractId;
-        orderToUpsert.Pricebook2Id = standardPricebookId;
-        // Map other Order fields from externalOrderData
-        orderToUpsert.Status = (String) externalOrderData.get('Status'); // e.g., 'Draft', 'Activated'
-        orderToUpsert.EffectiveDate = Date.valueOf(((String)externalOrderData.get('EffectiveDate')).substring(0,10)); // Assuming YYYY-MM-DD format
-/* orderToUpsert.OrderNumber = (String) externalOrderData.get('OrderNumber'); */
-        // Add Billing/Shipping Address etc. if available
-
-        Database.UpsertResult orderUpsertResult = Database.upsert(orderToUpsert, orderExternalIdField, false);
-        Id localOrderId = null;
-
-        if (orderUpsertResult.isSuccess()) {
-            localOrderId = orderUpsertResult.getId();
-            System.debug((orderUpsertResult.isCreated() ? 'Inserted' : 'Updated') + ' Order: ' + localOrderId);
-        } else {
-            System.debug('Order upsert failed for external ID ' + externalOrderId + ': ' + orderUpsertResult.getErrors()[0].getMessage());
-            return; // Cannot proceed without a local Order ID
-        }
-
-        // 2. Upsert Order Items
-        List<OrderItem> itemsToUpsert = new List<OrderItem>();
+        // Query existing OrderItems by External_Id__c
         Set<String> externalItemIds = new Set<String>();
         for(Map<String, Object> itemData : externalOrderItems) {
              externalItemIds.add((String)itemData.get('Id'));
         }
 
-        Map<String, Id> existingItemMap = new Map<String, Id>();
-         if(!externalItemIds.isEmpty()){
-             for(OrderItem oi : [SELECT Id, External_Id__c FROM OrderItem WHERE External_Id__c IN :externalItemIds]) {
-                 existingItemMap.put(oi.External_Id__c, oi.Id);
-             }
-         }
-
+        Map<String, OrderItem> existingItemMap = new Map<String, OrderItem>();
+        if(!externalItemIds.isEmpty()){
+            for(OrderItem oi : [SELECT Id, External_Id__c FROM OrderItem WHERE External_Id__c IN :externalItemIds]) {
+                existingItemMap.put(oi.External_Id__c, oi);
+            }
+        }
 
         for (Map<String, Object> itemData : externalOrderItems) {
             String externalItemId = (String) itemData.get('Id');
             String externalProductId = (String) itemData.get('Product2Id');
 
-            // Ensure we have the corresponding local PricebookEntry
             if (String.isBlank(externalItemId) || String.isBlank(externalProductId) || !localPricebookEntryIdMap.containsKey(externalProductId)) {
                 System.debug('Skipping OrderItem upsert due to missing External Item ID, External Product ID, or local PricebookEntry. External Item ID: ' + externalItemId);
-                continue; // Skip this item
+                continue;
             }
 
             Id localPbeId = localPricebookEntryIdMap.get(externalProductId);
-            OrderItem item = new OrderItem();
-
-             if(existingItemMap.containsKey(externalItemId)) {
-                 item.Id = existingItemMap.get(externalItemId); // Prepare for update
-             } else {
-                 item.External_Id__c = externalItemId; // Set external ID only on insert
-             }
-
-            item.OrderId = localOrderId;
-            item.PricebookEntryId = localPbeId;
-            // Map other OrderItem fields
-            // Use Decimal.valueOf for numbers coming as strings/objects
-            Object quantityObj = itemData.get('Quantity');
-            if(quantityObj instanceOf Decimal || quantityObj instanceOf Integer || quantityObj instanceOf Double) {
-                 item.Quantity = (Decimal)quantityObj;
-            } else if (quantityObj instanceOf String && String.isNotBlank((String)quantityObj)) {
-                 item.Quantity = Decimal.valueOf((String)quantityObj);
+            OrderItem item;
+            if(existingItemMap.containsKey(externalItemId)) {
+                item = existingItemMap.get(externalItemId);
+                // Update fields
+                item.OrderId = localOrderId;
+                item.PricebookEntryId = localPbeId;
+                Object quantityObj = itemData.get('Quantity');
+                if(quantityObj instanceOf Decimal || quantityObj instanceOf Integer || quantityObj instanceOf Double) {
+                    item.Quantity = (Decimal)quantityObj;
+                } else if (quantityObj instanceOf String && String.isNotBlank((String)quantityObj)) {
+                    item.Quantity = Decimal.valueOf((String)quantityObj);
+                } else {
+                    item.Quantity = 0;
+                }
+                Object unitPriceObj = itemData.get('UnitPrice');
+                if(unitPriceObj instanceOf Decimal || unitPriceObj instanceOf Integer || unitPriceObj instanceOf Double) {
+                    item.UnitPrice = (Decimal)unitPriceObj;
+                } else if (unitPriceObj instanceOf String && String.isNotBlank((String)unitPriceObj)) {
+                    item.UnitPrice = Decimal.valueOf((String)unitPriceObj);
+                } else {
+                    System.debug('UnitPrice missing or invalid for external item ' + externalItemId);
+                }
+                itemsToUpdate.add(item);
             } else {
-                 item.Quantity = 0; // Default or handle error
+                item = new OrderItem();
+                item.External_Id__c = externalItemId;
+                item.OrderId = localOrderId;
+                item.PricebookEntryId = localPbeId;
+                Object quantityObj = itemData.get('Quantity');
+                if(quantityObj instanceOf Decimal || quantityObj instanceOf Integer || quantityObj instanceOf Double) {
+                    item.Quantity = (Decimal)quantityObj;
+                } else if (quantityObj instanceOf String && String.isNotBlank((String)quantityObj)) {
+                    item.Quantity = Decimal.valueOf((String)quantityObj);
+                } else {
+                    item.Quantity = 0;
+                }
+                Object unitPriceObj = itemData.get('UnitPrice');
+                if(unitPriceObj instanceOf Decimal || unitPriceObj instanceOf Integer || unitPriceObj instanceOf Double) {
+                    item.UnitPrice = (Decimal)unitPriceObj;
+                } else if (unitPriceObj instanceOf String && String.isNotBlank((String)unitPriceObj)) {
+                    item.UnitPrice = Decimal.valueOf((String)unitPriceObj);
+                } else {
+                    System.debug('UnitPrice missing or invalid for external item ' + externalItemId);
+                }
+                itemsToInsert.add(item);
             }
-
-            Object unitPriceObj = itemData.get('UnitPrice');
-             if(unitPriceObj instanceOf Decimal || unitPriceObj instanceOf Integer || unitPriceObj instanceOf Double) {
-                 item.UnitPrice = (Decimal)unitPriceObj;
-            } else if (unitPriceObj instanceOf String && String.isNotBlank((String)unitPriceObj)) {
-                 item.UnitPrice = Decimal.valueOf((String)unitPriceObj);
-            } else {
-                 // If UnitPrice is null/invalid, Salesforce might pull from PBE, or you might need to handle it
-                 System.debug('UnitPrice missing or invalid for external item ' + externalItemId);
-                 // item.UnitPrice = 0; // Set a default?
-            }
-
-            // Add Description etc. if available
-
-            itemsToUpsert.add(item);
         }
 
-        if (!itemsToUpsert.isEmpty()) {
-            List<Database.UpsertResult> itemUpsertResults = Database.upsert(itemsToUpsert, itemExternalIdField, false);
-            for (Integer i = 0; i < itemUpsertResults.size(); i++) {
-                Database.UpsertResult res = itemUpsertResults[i];
-                OrderItem processedItem = itemsToUpsert[i];
-                 String externalId = processedItem.External_Id__c != null ? processedItem.External_Id__c : 'Unknown'; // Try to get external ID for logging
-
-                if (res.isSuccess()) {
-                     System.debug((res.isCreated() ? 'Inserted' : 'Updated') + ' OrderItem: ' + res.getId() + ' for External ID: ' + externalId);
+        if (!itemsToInsert.isEmpty()) {
+            Database.SaveResult[] insertResults = Database.insert(itemsToInsert, false);
+            for (Integer i = 0; i < insertResults.size(); i++) {
+                if (insertResults[i].isSuccess()) {
+                    System.debug('Inserted OrderItem: ' + insertResults[i].getId() + ' for External ID: ' + itemsToInsert[i].External_Id__c);
                 } else {
-                    System.debug('OrderItem upsert failed for external ID ' + externalId + ': ' + res.getErrors()[0].getMessage());
+                    System.debug('OrderItem insert failed for external ID ' + itemsToInsert[i].External_Id__c + ': ' + insertResults[i].getErrors()[0].getMessage());
                 }
             }
-        } else {
-             System.debug('No valid OrderItems to upsert for Order ' + localOrderId);
         }
+
+        if (!itemsToUpdate.isEmpty()) {
+            Database.SaveResult[] updateResults = Database.update(itemsToUpdate, false);
+            for (Integer i = 0; i < updateResults.size(); i++) {
+                if (updateResults[i].isSuccess()) {
+                    System.debug('Updated OrderItem: ' + updateResults[i].getId() + ' for External ID: ' + itemsToUpdate[i].External_Id__c);
+                } else {
+                    System.debug('OrderItem update failed for external ID ' + itemsToUpdate[i].External_Id__c + ': ' + updateResults[i].getErrors()[0].getMessage());
+                }
+            }
+        }
+
     }
 }
