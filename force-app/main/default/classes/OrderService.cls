@@ -1,5 +1,6 @@
 public with sharing class OrderService implements IOrderService {
 
+
     // importan querry /services/data/v62.0/query?q=SELECT+Id+FROM+Order+WHERE+Account.Name='jihen+wijden'
     private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
     private static final String EXTERNAL_INSTANCE_URL = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com'; 
@@ -13,14 +14,182 @@ public with sharing class OrderService implements IOrderService {
      * @param externalOrderId The ID of the Order in the external system.
      * @param externalAccountId The ID of the related Account in the external system.
      */
+
+     
+    /**
+     * @description Queries Orders from external org by Account.PersonEmail dynamically and syncs each order.
+     * @param email The email address to filter Orders by Account.PersonEmail.
+     */
+    public void getOrdersByEmailFromExternal(String email) {
+        if (String.isBlank(email)) {
+            System.debug('Email parameter is blank. Aborting getOrdersByEmailFromExternal.');
+            return;
+        }
+        String accessToken = authenticate();
+        if (accessToken == null) {
+            System.debug('Authentication failed. Aborting getOrdersByEmailFromExternal.');
+            return;
+        }
+        // Construct SOQL query with dynamic email parameter, URL encoded
+        String soql = 'SELECT Id, AccountId FROM Order WHERE Account.PersonEmail = \'' 
+            + String.escapeSingleQuotes(email) + '\'';
+        String encodedQuery = EncodingUtil.urlEncode(soql, 'UTF-8');
+        String queryEndpoint = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/query?q=' + encodedQuery;
+
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint(queryEndpoint);
+        req.setMethod('GET');
+        req.setHeader('Authorization', 'Bearer ' + accessToken);
+        req.setHeader('Content-Type', 'application/json');
+
+        Http http = new Http();
+        HttpResponse res;
+        try {
+            res = http.send(req);
+        } catch (System.CalloutException ce) {
+            System.debug('Callout failed in getOrdersByEmailFromExternal: ' + ce.getMessage());
+            return;
+        }
+
+        if (res.getStatusCode() == 200) {
+            Map<String, Object> jsonResponse = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            List<Object> records = (List<Object>) jsonResponse.get('records');
+            if (records == null || records.isEmpty()) {
+                System.debug('No orders found in external org for email: ' + email);
+                return;
+            }
+            // Collect all external order data first
+            List<ExternalOrderData> allExternalOrderData = new List<ExternalOrderData>();
+            for (Object rec : records) {
+                Map<String, Object> orderRecord = (Map<String, Object>) rec;
+                String externalOrderId = (String) orderRecord.get('Id');
+                String externalAccountId = (String) orderRecord.get('AccountId');
+                if (externalOrderId != null && externalAccountId != null) {
+                    ExternalOrderData eod = fetchExternalOrderData(externalOrderId, externalAccountId, accessToken);
+                    if (eod != null) {
+                        allExternalOrderData.add(eod);
+                    } else {
+                        System.debug('Skipping order due to failed external data fetch for order ID: ' + externalOrderId);
+                    }
+                } else {
+                    System.debug('Skipping order with missing externalOrderId or externalAccountId.');
+                }
+            }
+            // After all callouts, perform DML operations
+            for (ExternalOrderData eod : allExternalOrderData) {
+                syncOrderDataWithExternalData(eod);
+            }
+        } else {
+            System.debug('Failed to query external orders. Status: ' + res.getStatusCode() + ' Body: ' + res.getBody());
+        }
+    }
+
+    // New inner class to hold external order data
+    private class ExternalOrderData {
+        public String externalOrderId;
+        public String externalAccountId;
+        public Map<String, Object> externalOrderData;
+        public List<Map<String, Object>> externalOrderItems;
+        public Map<String, Map<String, Object>> externalProductDataMap;
+    }
+
+    // New method to fetch all external data for an order (callouts only)
+    private ExternalOrderData fetchExternalOrderData(String externalOrderId, String externalAccountId, String accessToken) {
+        ExternalOrderData eod = new ExternalOrderData();
+        eod.externalOrderId = externalOrderId;
+        eod.externalAccountId = externalAccountId;
+
+        // 1. Get External Order Header Data
+        eod.externalOrderData = getExternalRecordById(ORDER_ENDPOINT, externalOrderId, accessToken);
+        if (eod.externalOrderData == null) {
+            System.debug('Failed to fetch external order details for ID: ' + externalOrderId);
+            return null;
+        }
+
+        // 2. Get External Order Items
+        eod.externalOrderItems = getExternalOrderItems(externalOrderId, accessToken);
+        if (eod.externalOrderItems == null || eod.externalOrderItems.isEmpty()) {
+            System.debug('No order items found or failed to fetch items for external order ID: ' + externalOrderId);
+            return null;
+        }
+
+        // 3. Get Unique External Product IDs from Items
+        Set<String> externalProductIds = new Set<String>();
+        for (Map<String, Object> item : eod.externalOrderItems) {
+            String prodId = (String) item.get('Product2Id'); 
+            if (String.isNotBlank(prodId)) {
+                externalProductIds.add(prodId);
+            }
+        }
+
+        // 4. Get External Product Details
+        eod.externalProductDataMap = new Map<String, Map<String, Object>>();
+        for (String prodId : externalProductIds) {
+            Map<String, Object> productData = getExternalRecordById(PRODUCT_ENDPOINT, prodId, accessToken);
+            if (productData != null) {
+                eod.externalProductDataMap.put(prodId, productData);
+            } else {
+                System.debug('Warning: Failed to fetch details for external product ID: ' + prodId);
+            }
+        }
+        return eod;
+    }
+
+    // New method to perform DML operations using collected external data
+    private void syncOrderDataWithExternalData(ExternalOrderData eod) {
+        if (eod == null) {
+            System.debug('syncOrderDataWithExternalData called with null data.');
+            return;
+        }
+        try {
+            // Ensure Local Account Exists (using External ID)
+            Account localAccount = ensureLocalAccount(eod.externalAccountId, null);
+            if (localAccount == null || localAccount.Id == null) {
+                System.debug('Failed to find or create local Account for external ID: ' + eod.externalAccountId + '. Aborting order sync.');
+                return;
+            }
+
+            // Ensure Dummy Contract Exists (linked to Account)
+            Contract localContract = ensureDummyContract(localAccount.Id, eod.externalOrderId);
+            if (localContract == null || localContract.Id == null) {
+                System.debug('Failed to create dummy Contract for Account: ' + localAccount.Id + '. Aborting order sync.');
+                return;
+            }
+
+            // Upsert Products and PricebookEntries Locally
+            Map<String, Id> localProductIdMap = upsertProductsAndGetIds(eod.externalProductDataMap);
+            Map<String, Id> localPricebookEntryIdMap = ensurePricebookEntries(localProductIdMap);
+
+            // Upsert Order and Order Items Locally
+            upsertOrderAndItems(
+                eod.externalOrderData,
+                eod.externalOrderItems,
+                localAccount.Id,
+                localContract.Id,
+                localProductIdMap,
+                localPricebookEntryIdMap
+            );
+
+            System.debug('Successfully synced data for external order ID: ' + eod.externalOrderId);
+
+        } catch (Exception e) {
+            System.debug('Error during syncOrderDataWithExternalData for external Order ID ' + eod.externalOrderId + ': ' + e.getMessage() + '\nStackTrace: ' + e.getStackTraceString());
+        }
+    }
     public void syncOrderData(String externalOrderId, String externalAccountId) {
+        syncOrderData(externalOrderId, externalAccountId, null);
+    }
+
+    public void syncOrderData(String externalOrderId, String externalAccountId, String accessToken) {
         if (String.isBlank(externalOrderId) || String.isBlank(externalAccountId)) {
             System.debug('External Order ID and External Account ID are required.');
             return; 
         }
 
         try {
-            String accessToken = authenticate();
+            if (accessToken == null) {
+                accessToken = authenticate();
+            }
             if (accessToken == null) {
                 System.debug('Authentication failed. Aborting sync for Order: ' + externalOrderId);
                 return;
