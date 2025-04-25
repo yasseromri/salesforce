@@ -1,7 +1,5 @@
 public with sharing class OrderService implements IOrderService {
 
-
-    // importan querry /services/data/v62.0/query?q=SELECT+Id+FROM+Order+WHERE+Account.Name='jihen+wijden'
     private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
     private static final String EXTERNAL_INSTANCE_URL = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com'; 
     private static final String API_VERSION = 'v63.0'; 
@@ -9,17 +7,7 @@ public with sharing class OrderService implements IOrderService {
     private static final String ORDER_ITEM_QUERY_ENDPOINT = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/query?q=SELECT+Id,OrderId,Product2Id,Quantity,UnitPrice+FROM+OrderItem+WHERE+OrderId='; // Example Query
     private static final String PRODUCT_ENDPOINT = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/Product2/';
     private static final String ACCOUNT_ENDPOINT = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/Account/';
-    /**
-     * @description Fetches order, items, products, ensures contract/account, and upserts locally.
-     * @param externalOrderId The ID of the Order in the external system.
-     * @param externalAccountId The ID of the related Account in the external system.
-     */
 
-     
-    /**
-     * @description Queries Orders from external org by Account.PersonEmail dynamically and syncs each order.
-     * @param email The email address to filter Orders by Account.PersonEmail.
-     */
     public void getOrdersByEmailFromExternal(String email) {
         if (String.isBlank(email)) {
             System.debug('Email parameter is blank. Aborting getOrdersByEmailFromExternal.');
@@ -30,7 +18,6 @@ public with sharing class OrderService implements IOrderService {
             System.debug('Authentication failed. Aborting getOrdersByEmailFromExternal.');
             return;
         }
-        // Construct SOQL query with dynamic email parameter, URL encoded
         String soql = 'SELECT Id, AccountId FROM Order WHERE Account.PersonEmail = \'' 
             + String.escapeSingleQuotes(email) + '\'';
         String encodedQuery = EncodingUtil.urlEncode(soql, 'UTF-8');
@@ -58,7 +45,6 @@ public with sharing class OrderService implements IOrderService {
                 System.debug('No orders found in external org for email: ' + email);
                 return;
             }
-            // Collect all external order data first
             List<ExternalOrderData> allExternalOrderData = new List<ExternalOrderData>();
             for (Object rec : records) {
                 Map<String, Object> orderRecord = (Map<String, Object>) rec;
@@ -75,7 +61,6 @@ public with sharing class OrderService implements IOrderService {
                     System.debug('Skipping order with missing externalOrderId or externalAccountId.');
                 }
             }
-            // After all callouts, perform DML operations
             for (ExternalOrderData eod : allExternalOrderData) {
                 syncOrderDataWithExternalData(eod);
             }
@@ -84,50 +69,46 @@ public with sharing class OrderService implements IOrderService {
         }
     }
 
-    // New inner class to hold external order data
     private class ExternalOrderData {
         public String externalOrderId;
         public String externalAccountId;
-        public Map<String, Object> externalOrderData;
-        public List<Map<String, Object>> externalOrderItems;
-        public Map<String, Map<String, Object>> externalProductDataMap;
+        public ExternalOrderDTO externalOrderDTO;
+        public List<ExternalOrderItemDTO> externalOrderItemDTOs;
+        public Map<String, ExternalProductDTO> externalProductDTOMap;
     }
 
-    // New method to fetch all external data for an order (callouts only)
     private ExternalOrderData fetchExternalOrderData(String externalOrderId, String externalAccountId, String accessToken) {
         ExternalOrderData eod = new ExternalOrderData();
         eod.externalOrderId = externalOrderId;
         eod.externalAccountId = externalAccountId;
 
-        // 1. Get External Order Header Data
-        eod.externalOrderData = getExternalRecordById(ORDER_ENDPOINT, externalOrderId, accessToken);
-        if (eod.externalOrderData == null) {
+        String orderJson = getExternalRecordJsonById(ORDER_ENDPOINT, externalOrderId, accessToken);
+        if (String.isBlank(orderJson)) {
             System.debug('Failed to fetch external order details for ID: ' + externalOrderId);
             return null;
         }
+        eod.externalOrderDTO = (ExternalOrderDTO) JSON.deserialize(orderJson, ExternalOrderDTO.class);
 
-        // 2. Get External Order Items
-        eod.externalOrderItems = getExternalOrderItems(externalOrderId, accessToken);
-        if (eod.externalOrderItems == null || eod.externalOrderItems.isEmpty()) {
+        String orderItemsJson = getExternalOrderItemsJson(externalOrderId, accessToken);
+        if (String.isBlank(orderItemsJson)) {
             System.debug('No order items found or failed to fetch items for external order ID: ' + externalOrderId);
             return null;
         }
+        eod.externalOrderItemDTOs = (List<ExternalOrderItemDTO>) JSON.deserialize(orderItemsJson, List<ExternalOrderItemDTO>.class);
 
-        // 3. Get Unique External Product IDs from Items
         Set<String> externalProductIds = new Set<String>();
-        for (Map<String, Object> item : eod.externalOrderItems) {
-            String prodId = (String) item.get('Product2Id'); 
-            if (String.isNotBlank(prodId)) {
-                externalProductIds.add(prodId);
+        for (ExternalOrderItemDTO item : eod.externalOrderItemDTOs) {
+            if (String.isNotBlank(item.Product2Id)) {
+                externalProductIds.add(item.Product2Id);
             }
         }
 
-        // 4. Get External Product Details
-        eod.externalProductDataMap = new Map<String, Map<String, Object>>();
+        eod.externalProductDTOMap = new Map<String, ExternalProductDTO>();
         for (String prodId : externalProductIds) {
-            Map<String, Object> productData = getExternalRecordById(PRODUCT_ENDPOINT, prodId, accessToken);
-            if (productData != null) {
-                eod.externalProductDataMap.put(prodId, productData);
+            String productJson = getExternalRecordJsonById(PRODUCT_ENDPOINT, prodId, accessToken);
+            if (String.isNotBlank(productJson)) {
+                ExternalProductDTO productDTO = (ExternalProductDTO) JSON.deserialize(productJson, ExternalProductDTO.class);
+                eod.externalProductDTOMap.put(prodId, productDTO);
             } else {
                 System.debug('Warning: Failed to fetch details for external product ID: ' + prodId);
             }
@@ -135,35 +116,30 @@ public with sharing class OrderService implements IOrderService {
         return eod;
     }
 
-    // New method to perform DML operations using collected external data
     private void syncOrderDataWithExternalData(ExternalOrderData eod) {
         if (eod == null) {
             System.debug('syncOrderDataWithExternalData called with null data.');
             return;
         }
         try {
-            // Ensure Local Account Exists (using External ID)
             Account localAccount = ensureLocalAccount(eod.externalAccountId, null);
             if (localAccount == null || localAccount.Id == null) {
                 System.debug('Failed to find or create local Account for external ID: ' + eod.externalAccountId + '. Aborting order sync.');
                 return;
             }
 
-            // Ensure Dummy Contract Exists (linked to Account)
             Contract localContract = ensureDummyContract(localAccount.Id, eod.externalOrderId);
             if (localContract == null || localContract.Id == null) {
                 System.debug('Failed to create dummy Contract for Account: ' + localAccount.Id + '. Aborting order sync.');
                 return;
             }
 
-            // Upsert Products and PricebookEntries Locally
-            Map<String, Id> localProductIdMap = upsertProductsAndGetIds(eod.externalProductDataMap);
+            Map<String, Id> localProductIdMap = upsertProductsAndGetIds(eod.externalProductDTOMap);
             Map<String, Id> localPricebookEntryIdMap = ensurePricebookEntries(localProductIdMap);
 
-            // Upsert Order and Order Items Locally
             upsertOrderAndItems(
-                eod.externalOrderData,
-                eod.externalOrderItems,
+                eod.externalOrderDTO,
+                eod.externalOrderItemDTOs,
                 localAccount.Id,
                 localContract.Id,
                 localProductIdMap,
@@ -176,6 +152,7 @@ public with sharing class OrderService implements IOrderService {
             System.debug('Error during syncOrderDataWithExternalData for external Order ID ' + eod.externalOrderId + ': ' + e.getMessage() + '\nStackTrace: ' + e.getStackTraceString());
         }
     }
+
     public void syncOrderData(String externalOrderId, String externalAccountId) {
         syncOrderData(externalOrderId, externalAccountId, null);
     }
@@ -195,69 +172,13 @@ public with sharing class OrderService implements IOrderService {
                 return;
             }
 
-            // 1. Get External Order Header Data
-            Map<String, Object> externalOrderData = getExternalRecordById(ORDER_ENDPOINT, externalOrderId, accessToken);
-            if (externalOrderData == null) {
-                System.debug('Failed to fetch external order details for ID: ' + externalOrderId);
-                return;
-            }
-             // Extract necessary fields like OrderNumber, Status, OrderStartDate etc. from externalOrderData
-            List<Map<String, Object>> externalOrderItems = getExternalOrderItems(externalOrderId, accessToken);
-            if (externalOrderItems == null || externalOrderItems.isEmpty()) {
-                System.debug('No order items found or failed to fetch items for external order ID: ' + externalOrderId);
+            ExternalOrderData eod = fetchExternalOrderData(externalOrderId, externalAccountId, accessToken);
+            if (eod == null) {
+                System.debug('Failed to fetch external order data for ID: ' + externalOrderId);
                 return;
             }
 
-            // 3. Get Unique External Product IDs from Items
-            Set<String> externalProductIds = new Set<String>();
-            for (Map<String, Object> item : externalOrderItems) {
-                String prodId = (String) item.get('Product2Id'); 
-                if (String.isNotBlank(prodId)) {
-                    externalProductIds.add(prodId);
-                }
-            }
-
-            // 4. Get External Product Details
-            Map<String, Map<String, Object>> externalProductDataMap = new Map<String, Map<String, Object>>();
-            for (String prodId : externalProductIds) {
-                Map<String, Object> productData = getExternalRecordById(PRODUCT_ENDPOINT, prodId, accessToken);
-                if (productData != null) {
-                    externalProductDataMap.put(prodId, productData);
-                } else {
-                    System.debug('Warning: Failed to fetch details for external product ID: ' + prodId);
-                }
-            }
-
-            // --- Now Handle Local Data Upsert ---
-
-            // 5. Ensure Local Account Exists (using External ID)
-            Account localAccount = ensureLocalAccount(externalAccountId, accessToken);
-            if (localAccount == null || localAccount.Id == null) {
-                System.debug('Failed to find or create local Account for external ID: ' + externalAccountId + '. Aborting order sync.');
-                return;
-            }
-
-            // 6. Ensure Dummy Contract Exists (linked to Account)
-            Contract localContract = ensureDummyContract(localAccount.Id, externalOrderId); // Use externalOrderId for uniqueness?
-            if (localContract == null || localContract.Id == null) {
-                System.debug('Failed to create dummy Contract for Account: ' + localAccount.Id + '. Aborting order sync.');
-                return; // Or proceed without contract if acceptable
-            }
-
-            // 7. Upsert Products and PricebookEntries Locally
-            Map<String, Id> localProductIdMap = upsertProductsAndGetIds(externalProductDataMap);
-            Map<String, Id> localPricebookEntryIdMap = ensurePricebookEntries(localProductIdMap);
-
-
-            // 8. Upsert Order and Order Items Locally
-            upsertOrderAndItems(
-                externalOrderData,
-                externalOrderItems,
-                localAccount.Id,
-                localContract.Id,
-                localProductIdMap,
-                localPricebookEntryIdMap
-            );
+            syncOrderDataWithExternalData(eod);
 
             System.debug('Successfully synced data for external order ID: ' + externalOrderId);
 
@@ -265,6 +186,7 @@ public with sharing class OrderService implements IOrderService {
             System.debug('Error during syncOrderData for external Order ID ' + externalOrderId + ': ' + e.getMessage() + '\nStackTrace: ' + e.getStackTraceString());
         }
     }
+
     public String authenticate() {
         HttpRequest req = new HttpRequest();
         req.setEndpoint(AUTH_URL);
@@ -300,12 +222,7 @@ public with sharing class OrderService implements IOrderService {
         }
     }
 
-    // --- External Data Fetching Helpers ---
-
-    /**
-     * @description Generic method to fetch a single SObject record by ID from the external org.
-     */
-    private Map<String, Object> getExternalRecordById(String endpointBase, String recordId, String accessToken) {
+    private String getExternalRecordJsonById(String endpointBase, String recordId, String accessToken) {
         HttpRequest req = new HttpRequest();
         req.setEndpoint(endpointBase + recordId);
         req.setMethod('GET');
@@ -320,53 +237,47 @@ public with sharing class OrderService implements IOrderService {
              return null;
         }
         if (res != null && res.getStatusCode() == 200) {
-            return (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            return res.getBody();
         } else {
             System.debug('External record detail fetch failed for endpoint ' + endpointBase + ' Id ' + recordId + '. Status: ' + (res != null ? String.valueOf(res.getStatusCode()) : 'No Response') + ' Body: ' + (res != null ? res.getBody() : 'N/A'));
             return null;
         }
     }
 
-    /**
-     * @description Fetches OrderItems related to a specific Order ID from the external org.
-     */
-    private List<Map<String, Object>> getExternalOrderItems(String externalOrderId, String accessToken) {
-        String query = EncodingUtil.urlEncode('\'' + externalOrderId + '\'', 'UTF-8');
-        String endpoint = ORDER_ITEM_QUERY_ENDPOINT + query;
+    private String getExternalOrderItemsJson(String externalOrderId, String accessToken) {
+        String query = 'SELECT Id, OrderId, Product2Id, Quantity, UnitPrice FROM OrderItem WHERE OrderId = \'' + externalOrderId + '\'';
+        String encodedQuery = EncodingUtil.urlEncode(query, 'UTF-8');
+        String queryEndpoint = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/query?q=' + encodedQuery;
+
         HttpRequest req = new HttpRequest();
-        req.setEndpoint(endpoint);
+        req.setEndpoint(queryEndpoint);
         req.setMethod('GET');
         req.setHeader('Authorization', 'Bearer ' + accessToken);
         req.setHeader('Content-Type', 'application/json');
+
         Http http = new Http();
-        HttpResponse res = null;
+        HttpResponse res;
         try {
-             res = http.send(req);
+            res = http.send(req);
         } catch (System.CalloutException ce) {
-             System.debug('Order Item query callout failed for Order ID ' + externalOrderId + ': ' + ce.getMessage());
-             return null;
+            System.debug('Callout failed in getExternalOrderItemsJson: ' + ce.getMessage());
+            return null;
         }
 
-        if (res != null && res.getStatusCode() == 200) {
+        if (res.getStatusCode() == 200) {
             Map<String, Object> jsonResponse = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
             List<Object> records = (List<Object>) jsonResponse.get('records');
-            List<Map<String, Object>> orderItems = new List<Map<String, Object>>();
-            for (Object record : records) {
-                orderItems.add((Map<String, Object>) record);
+            if (records == null || records.isEmpty()) {
+                System.debug('No order items found in external org for order ID: ' + externalOrderId);
+                return null;
             }
-            return orderItems;
+            return JSON.serialize(records);
         } else {
-            System.debug('External Order Item query failed for Order ID ' + externalOrderId + '. Status: ' + (res != null ? String.valueOf(res.getStatusCode()) : 'No Response') + ' Body: ' + (res != null ? res.getBody() : 'N/A'));
+            System.debug('Failed to query external order items. Status: ' + res.getStatusCode() + ' Body: ' + res.getBody());
             return null;
         }
     }
 
-    // --- Local Data Handling Helpers ---
-
-    /**
-     * @description Finds local account by external ID or fetches from external system and upserts.
-     *              Reuses logic similar to ExternAccountService but simplified.
-     */
     private Account ensureLocalAccount(String externalAccountId, String accessToken) {
         List<Account> existingAccounts = AccountSelector.selectByExternalId(externalAccountId);
         if (!existingAccounts.isEmpty()) {
@@ -374,10 +285,8 @@ public with sharing class OrderService implements IOrderService {
             return existingAccounts[0];
         } else {
             System.debug('Local Account not found for external ID: ' + externalAccountId + '. Fetching from external org.');
-            Map<String, Object> externalAccountData = getExternalRecordById(ACCOUNT_ENDPOINT, externalAccountId, accessToken);
+            Map<String, Object> externalAccountData = (Map<String, Object>) JSON.deserializeUntyped(getExternalRecordJsonById(ACCOUNT_ENDPOINT, externalAccountId, accessToken));
             if (externalAccountData != null) {
-                // Use a dedicated method or class (like ExternAccountService.upsertAccount)
-                // For simplicity here, we do a basic insert/update
                 return upsertLocalAccount(externalAccountData);
             } else {
                 System.debug('Failed to fetch external account data for ID: ' + externalAccountId);
@@ -385,18 +294,13 @@ public with sharing class OrderService implements IOrderService {
             }
         }
     }
-    
 
-     /**
-     * @description Basic upsert logic for Account based on External_Id__c.
-     *              Consider reusing ExternAccountService.upsertAccount for robustness.
-     */
     private Account upsertLocalAccount(Map<String, Object> data) {
         String externalId = (String) data.get('Id');
         if (String.isBlank(externalId)) return null;
 
         Schema.SObjectField externalIdField = Account.SObjectType.getDescribe().fields.getMap().get('External_Id__c');
-         if(externalIdField == null){
+        if(externalIdField == null){
             System.debug('Error: External_Id__c field missing on Account.');
             return null; 
         }
@@ -404,19 +308,17 @@ public with sharing class OrderService implements IOrderService {
         List<Account> existing = [SELECT Id FROM Account WHERE External_Id__c = :externalId LIMIT 1];
         Account acc = !existing.isEmpty() ? new Account(Id = existing[0].Id) : new Account();
 
-        // Map essential fields - ADD MORE AS NEEDED
-        acc.Name = (String) data.get('Name'); // For Business Accounts
-        acc.FirstName = (String) data.get('FirstName'); // For Person Accounts
-        acc.LastName = (String) data.get('LastName'); // For Person Accounts (Required)
-        acc.PersonEmail = (String) data.get('PersonEmail'); // For Person Accounts
+        acc.Name = (String) data.get('Name');
+        acc.FirstName = (String) data.get('FirstName');
+        acc.LastName = (String) data.get('LastName');
+        acc.PersonEmail = (String) data.get('PersonEmail');
         acc.Phone = (String) data.get('Phone');
-        acc.External_Id__c = externalId; // Set on insert
+        acc.External_Id__c = externalId;
 
         try {
             Database.UpsertResult result = Database.upsert(acc, externalIdField, false);
             if (result.isSuccess()) {
                 System.debug((result.isCreated() ? 'Inserted' : 'Updated') + ' Account: ' + result.getId());
-                // Query again to get all fields if needed, especially PersonContactId
                 return [SELECT Id, Name, PersonContactId, External_Id__c FROM Account WHERE Id = :result.getId()];
             } else {
                 System.debug('Account upsert failed for external ID ' + externalId + ': ' + result.getErrors()[0].getMessage());
@@ -428,20 +330,11 @@ public with sharing class OrderService implements IOrderService {
         }
     }
 
-
-    /**
-     * @description Creates a dummy Contract linked to the Account if one doesn't exist.
-     *              Uses a simple check based on AccountId and maybe Status/StartDate.
-     *              Consider adding External_Id__c to Contract for proper syncing if needed.
-     */
     private Contract ensureDummyContract(Id localAccountId, String externalOrderId) {
-        // Simple check: Find an active contract created today for this account? Or use External ID?
-        // Let's create a basic one linked to the account. Add External_Id__c if you want to sync contracts.
         List<Contract> existingContracts = [
             SELECT Id FROM Contract
             WHERE AccountId = :localAccountId
-            AND Status = 'Draft' // Or a specific status for these dummy contracts
-            // AND External_Id__c = :externalOrderId // Add this if syncing contracts by Order ID
+            AND Status = 'Draft'
             ORDER BY CreatedDate DESC
             LIMIT 1
         ];
@@ -454,9 +347,8 @@ public with sharing class OrderService implements IOrderService {
             Contract newContract = new Contract(
                 AccountId = localAccountId,
                 StartDate = Date.today(),
-                Status = 'Draft', // Or 'Activated' if needed immediately
-                ContractTerm = 12 // Default term in months
-                // External_Id__c = externalOrderId // Set if using external ID
+                Status = 'Draft',
+                ContractTerm = 12
             );
             try {
                 insert newContract;
@@ -469,46 +361,41 @@ public with sharing class OrderService implements IOrderService {
         }
     }
 
-    /**
-     * @description Upserts Product2 records based on external data and returns a map of
-     *              External Product ID -> Local Product2 ID.
-     */
-    private Map<String, Id> upsertProductsAndGetIds(Map<String, Map<String, Object>> externalProductDataMap) {
+    private Map<String, Id> upsertProductsAndGetIds(Map<String, ExternalProductDTO> externalProductDTOMap) {
         Map<String, Id> localProductIds = new Map<String, Id>();
 
         Schema.SObjectField externalIdField = Product2.SObjectType.getDescribe().fields.getMap().get('External_Id__c');
         if(externalIdField == null){
             System.debug('Error: External_Id__c field missing on Product2.');
-            return localProductIds; // Return empty map
+            return localProductIds;
         }
 
-        Set<String> externalIds = externalProductDataMap.keySet();
+        Set<String> externalIds = externalProductDTOMap.keySet();
         Map<String, Product2> existingProductMap = new Map<String, Product2>();
         for(Product2 p : [SELECT Id, External_Id__c FROM Product2 WHERE External_Id__c IN :externalIds]) {
             existingProductMap.put(p.External_Id__c, p);
-            localProductIds.put(p.External_Id__c, p.Id); // Add existing to the final map
+            localProductIds.put(p.External_Id__c, p.Id);
         }
 
         List<Product2> productsToInsert = new List<Product2>();
         List<Product2> productsToUpdate = new List<Product2>();
 
-        for (String extId : externalProductDataMap.keySet()) {
-            Map<String, Object> data = externalProductDataMap.get(extId);
+        for (String extId : externalProductDTOMap.keySet()) {
+            ExternalProductDTO dto = externalProductDTOMap.get(extId);
             Product2 prod;
             if(existingProductMap.containsKey(extId)) {
                 prod = existingProductMap.get(extId);
-                // Update fields
-                prod.Name = (String) data.get('Name');
-                prod.ProductCode = (String) data.get('ProductCode');
-                prod.Description = (String) data.get('Description');
+                prod.Name = dto.Name;
+                prod.ProductCode = dto.ProductCode;
+                prod.Description = dto.Description;
                 prod.IsActive = true;
                 productsToUpdate.add(prod);
             } else {
                 prod = new Product2();
                 prod.External_Id__c = extId;
-                prod.Name = (String) data.get('Name');
-                prod.ProductCode = (String) data.get('ProductCode');
-                prod.Description = (String) data.get('Description');
+                prod.Name = dto.Name;
+                prod.ProductCode = dto.ProductCode;
+                prod.Description = dto.Description;
                 prod.IsActive = true;
                 productsToInsert.add(prod);
             }
@@ -540,11 +427,7 @@ public with sharing class OrderService implements IOrderService {
 
         return localProductIds;
     }
-//ENA WSILIT HOUNI 
-     /**
-     * @description Ensures PricebookEntries exist for the given Product IDs in the standard pricebook.
-     *              Returns map of External Product ID -> Local PricebookEntry ID.
-     */
+
     private Map<String, Id> ensurePricebookEntries(Map<String, Id> localProductIdMap) {
         Map<String, Id> pbeIdMap = new Map<String, Id>();
         if (localProductIdMap == null || localProductIdMap.isEmpty()) {
@@ -554,42 +437,38 @@ public with sharing class OrderService implements IOrderService {
         Id standardPricebookId = Test.isRunningTest() ? Test.getStandardPricebookId() : [SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1].Id;
         if (standardPricebookId == null) {
             System.debug('Standard Pricebook ID not found. Cannot create PricebookEntries.');
-            return pbeIdMap; // Cannot proceed
+            return pbeIdMap;
         }
 
         Set<Id> productIds = new Set<Id>(localProductIdMap.values());
         Map<Id, Id> productIdToPbeIdMap = new Map<Id, Id>();
 
-        // Find existing PBEs
         for (PricebookEntry pbe : [SELECT Id, Product2Id FROM PricebookEntry WHERE Pricebook2Id = :standardPricebookId AND Product2Id IN :productIds]) {
             productIdToPbeIdMap.put(pbe.Product2Id, pbe.Id);
         }
 
         List<PricebookEntry> pbesToInsert = new List<PricebookEntry>();
         for (String externalProdId : localProductIdMap.keySet()) {
-             Id localProdId = localProductIdMap.get(externalProdId);
-             if (productIdToPbeIdMap.containsKey(localProdId)) {
-                 // PBE already exists, map it back to external ID
-                 pbeIdMap.put(externalProdId, productIdToPbeIdMap.get(localProdId));
-             } else {
-                 // PBE needs to be created
-                 PricebookEntry newPbe = new PricebookEntry(
-                     Pricebook2Id = standardPricebookId,
-                     Product2Id = localProdId,
-                     UnitPrice = 1.00, // *** Default Price - GET PRICE FROM EXTERNAL DATA if available ***
-                     IsActive = true
-                 );
-                 pbesToInsert.add(newPbe);
-             }
+            Id localProdId = localProductIdMap.get(externalProdId);
+            if (productIdToPbeIdMap.containsKey(localProdId)) {
+                pbeIdMap.put(externalProdId, productIdToPbeIdMap.get(localProdId));
+            } else {
+                PricebookEntry newPbe = new PricebookEntry(
+                    Pricebook2Id = standardPricebookId,
+                    Product2Id = localProdId,
+                    UnitPrice = 1.00,
+                    IsActive = true
+                );
+                pbesToInsert.add(newPbe);
+            }
         }
 
         if (!pbesToInsert.isEmpty()) {
             try {
-                Database.SaveResult[] insertResults = Database.insert(pbesToInsert, false); // Allow partial success
+                Database.SaveResult[] insertResults = Database.insert(pbesToInsert, false);
                 for(Integer i = 0; i < insertResults.size(); i++) {
                     Database.SaveResult sr = insertResults[i];
                     PricebookEntry insertedPbe = pbesToInsert[i];
-                    // Find the corresponding external product ID
                     String externalProdId = null;
                     for(String extId : localProductIdMap.keySet()){
                         if(localProductIdMap.get(extId) == insertedPbe.Product2Id){
@@ -602,7 +481,7 @@ public with sharing class OrderService implements IOrderService {
                         pbeIdMap.put(externalProdId, sr.getId());
                         System.debug('Inserted PricebookEntry: ' + sr.getId() + ' for Product: ' + insertedPbe.Product2Id);
                     } else {
-                         System.debug('Failed to insert PricebookEntry for Product ' + insertedPbe.Product2Id + ': ' + (sr.isSuccess() ? 'Could not map back to External ID' : sr.getErrors()[0].getMessage()));
+                        System.debug('Failed to insert PricebookEntry for Product ' + insertedPbe.Product2Id + ': ' + (sr.isSuccess() ? 'Could not map back to External ID' : sr.getErrors()[0].getMessage()));
                     }
                 }
             } catch (Exception e) {
@@ -613,21 +492,21 @@ public with sharing class OrderService implements IOrderService {
         return pbeIdMap;
     }
 
-
-    /**
-     * @description Upserts the Order header and related OrderItems locally.
-     */
     private void upsertOrderAndItems(
-        Map<String, Object> externalOrderData,
-        List<Map<String, Object>> externalOrderItems,
+        ExternalOrderDTO externalOrderDTO,
+        List<ExternalOrderItemDTO> externalOrderItemDTOs,
         Id localAccountId,
         Id localContractId,
         Map<String, Id> localProductIdMap,
         Map<String, Id> localPricebookEntryIdMap
     ) {
-        String externalOrderId = (String) externalOrderData.get('Id');
+        if (externalOrderDTO == null) {
+            System.debug('ExternalOrderDTO is null. Cannot upsert.');
+            return;
+        }
+        String externalOrderId = externalOrderDTO.Id;
         if (String.isBlank(externalOrderId)) {
-            System.debug('External Order ID missing from order data. Cannot upsert.');
+            System.debug('External Order ID missing from DTO. Cannot upsert.');
             return;
         }
 
@@ -636,17 +515,15 @@ public with sharing class OrderService implements IOrderService {
         List<OrderItem> itemsToInsert = new List<OrderItem>();
         List<OrderItem> itemsToUpdate = new List<OrderItem>();
 
-        // Query existing Order by External_Id__c
         List<Order> existingOrders = [SELECT Id, External_Id__c FROM Order WHERE External_Id__c = :externalOrderId LIMIT 1];
         Order orderToProcess;
         if (!existingOrders.isEmpty()) {
             orderToProcess = existingOrders[0];
-            // Update fields
             orderToProcess.AccountId = localAccountId;
             orderToProcess.ContractId = localContractId;
             orderToProcess.Pricebook2Id = Test.isRunningTest() ? Test.getStandardPricebookId() : [SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1].Id;
-            orderToProcess.Status = (String) externalOrderData.get('Status');
-            orderToProcess.EffectiveDate = Date.valueOf(((String)externalOrderData.get('EffectiveDate')).substring(0,10));
+            orderToProcess.Status = externalOrderDTO.Status;
+            orderToProcess.EffectiveDate = Date.valueOf(externalOrderDTO.EffectiveDate.substring(0,10));
             ordersToUpdate.add(orderToProcess);
         } else {
             orderToProcess = new Order();
@@ -654,8 +531,8 @@ public with sharing class OrderService implements IOrderService {
             orderToProcess.AccountId = localAccountId;
             orderToProcess.ContractId = localContractId;
             orderToProcess.Pricebook2Id = Test.isRunningTest() ? Test.getStandardPricebookId() : [SELECT Id FROM Pricebook2 WHERE IsStandard = true LIMIT 1].Id;
-            orderToProcess.Status = (String) externalOrderData.get('Status');
-            orderToProcess.EffectiveDate = Date.valueOf(((String)externalOrderData.get('EffectiveDate')).substring(0,10));
+            orderToProcess.Status = externalOrderDTO.Status;
+            orderToProcess.EffectiveDate = Date.valueOf(externalOrderDTO.EffectiveDate.substring(0,10));
             ordersToInsert.add(orderToProcess);
         }
 
@@ -685,10 +562,9 @@ public with sharing class OrderService implements IOrderService {
             return;
         }
 
-        // Query existing OrderItems by External_Id__c
         Set<String> externalItemIds = new Set<String>();
-        for(Map<String, Object> itemData : externalOrderItems) {
-             externalItemIds.add((String)itemData.get('Id'));
+        for(ExternalOrderItemDTO itemDTO : externalOrderItemDTOs) {
+             externalItemIds.add(itemDTO.Id);
         }
 
         Map<String, OrderItem> existingItemMap = new Map<String, OrderItem>();
@@ -698,9 +574,9 @@ public with sharing class OrderService implements IOrderService {
             }
         }
 
-        for (Map<String, Object> itemData : externalOrderItems) {
-            String externalItemId = (String) itemData.get('Id');
-            String externalProductId = (String) itemData.get('Product2Id');
+        for (ExternalOrderItemDTO itemDTO : externalOrderItemDTOs) {
+            String externalItemId = itemDTO.Id;
+            String externalProductId = itemDTO.Product2Id;
 
             if (String.isBlank(externalItemId) || String.isBlank(externalProductId) || !localPricebookEntryIdMap.containsKey(externalProductId)) {
                 System.debug('Skipping OrderItem upsert due to missing External Item ID, External Product ID, or local PricebookEntry. External Item ID: ' + externalItemId);
@@ -711,47 +587,18 @@ public with sharing class OrderService implements IOrderService {
             OrderItem item;
             if(existingItemMap.containsKey(externalItemId)) {
                 item = existingItemMap.get(externalItemId);
-                // Update fields
                 item.OrderId = localOrderId;
                 item.PricebookEntryId = localPbeId;
-                Object quantityObj = itemData.get('Quantity');
-                if(quantityObj instanceOf Decimal || quantityObj instanceOf Integer || quantityObj instanceOf Double) {
-                    item.Quantity = (Decimal)quantityObj;
-                } else if (quantityObj instanceOf String && String.isNotBlank((String)quantityObj)) {
-                    item.Quantity = Decimal.valueOf((String)quantityObj);
-                } else {
-                    item.Quantity = 0;
-                }
-                Object unitPriceObj = itemData.get('UnitPrice');
-                if(unitPriceObj instanceOf Decimal || unitPriceObj instanceOf Integer || unitPriceObj instanceOf Double) {
-                    item.UnitPrice = (Decimal)unitPriceObj;
-                } else if (unitPriceObj instanceOf String && String.isNotBlank((String)unitPriceObj)) {
-                    item.UnitPrice = Decimal.valueOf((String)unitPriceObj);
-                } else {
-                    System.debug('UnitPrice missing or invalid for external item ' + externalItemId);
-                }
+                item.Quantity = itemDTO.Quantity != null ? itemDTO.Quantity : 0;
+                item.UnitPrice = itemDTO.UnitPrice != null ? itemDTO.UnitPrice : 0;
                 itemsToUpdate.add(item);
             } else {
                 item = new OrderItem();
                 item.External_Id__c = externalItemId;
                 item.OrderId = localOrderId;
                 item.PricebookEntryId = localPbeId;
-                Object quantityObj = itemData.get('Quantity');
-                if(quantityObj instanceOf Decimal || quantityObj instanceOf Integer || quantityObj instanceOf Double) {
-                    item.Quantity = (Decimal)quantityObj;
-                } else if (quantityObj instanceOf String && String.isNotBlank((String)quantityObj)) {
-                    item.Quantity = Decimal.valueOf((String)quantityObj);
-                } else {
-                    item.Quantity = 0;
-                }
-                Object unitPriceObj = itemData.get('UnitPrice');
-                if(unitPriceObj instanceOf Decimal || unitPriceObj instanceOf Integer || unitPriceObj instanceOf Double) {
-                    item.UnitPrice = (Decimal)unitPriceObj;
-                } else if (unitPriceObj instanceOf String && String.isNotBlank((String)unitPriceObj)) {
-                    item.UnitPrice = Decimal.valueOf((String)unitPriceObj);
-                } else {
-                    System.debug('UnitPrice missing or invalid for external item ' + externalItemId);
-                }
+                item.Quantity = itemDTO.Quantity != null ? itemDTO.Quantity : 0;
+                item.UnitPrice = itemDTO.UnitPrice != null ? itemDTO.UnitPrice : 0;
                 itemsToInsert.add(item);
             }
         }
@@ -777,6 +624,5 @@ public with sharing class OrderService implements IOrderService {
                 }
             }
         }
-
     }
 }
