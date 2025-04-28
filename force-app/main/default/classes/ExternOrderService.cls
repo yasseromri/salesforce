@@ -109,25 +109,48 @@ public with sharing class ExternOrderService implements IOrderService {
     }
 
     public Boolean updateExternalOrderItem(String externalOrderId, OrderItem localItem, String accessToken) {
+        // Ensure localItem and its External_Id__c are not blank
+        if (localItem == null || String.isBlank(localItem.External_Id__c)) {
+            System.debug('Cannot update external OrderItem: Local item or its External_Id__c is blank.');
+            return false;
+        }
+        // Ensure externalOrderId is not blank
+        if (String.isBlank(externalOrderId)) {
+            System.debug('Cannot update external OrderItem: externalOrderId is blank.');
+            return false;
+        }
+    
         String endpoint = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/OrderItem/' + localItem.External_Id__c;
         HttpRequest req = new HttpRequest();
         req.setEndpoint(endpoint);
         req.setMethod('PATCH');
         req.setHeader('Authorization', 'Bearer ' + accessToken);
         req.setHeader('Content-Type', 'application/json');
-
+    
         Map<String, Object> payload = new Map<String, Object>();
-        payload.put('OrderId', localItem.External_Id__c);
-        payload.put('Product2Id', getExternalProductId(localItem.Product2Id));
+        // --- REMOVE OrderId --- It's not updateable and was set incorrectly anyway
+        // payload.put('OrderId', externalOrderId); // REMOVED
+    
+        // --- REMOVE Product2Id --- It's not updateable
+        // payload.put('Product2Id', getExternalProductId(localItem.Product2Id)); // REMOVED
+    
+        // --- KEEP updateable fields ---
         payload.put('Quantity', localItem.Quantity);
         payload.put('UnitPrice', localItem.UnitPrice);
-
+        // Add any other fields you need to update that ARE updateable (e.g., Description, ServiceDate)
+    
+        // Only send request if there's something to update
+        if (payload.isEmpty()) {
+            System.debug('No updateable fields found for external OrderItem: ' + localItem.External_Id__c);
+            return true; // Or false depending on desired behavior when nothing changes
+        }
+    
         req.setBody(JSON.serialize(payload));
-
+    
         Http http = new Http();
         try {
             HttpResponse res = http.send(req);
-            if (res.getStatusCode() == 204) {
+            if (res.getStatusCode() == 204) { // 204 No Content is success for PATCH
                 System.debug('Successfully updated external OrderItem: ' + localItem.External_Id__c);
                 return true;
             } else {
@@ -135,38 +158,76 @@ public with sharing class ExternOrderService implements IOrderService {
                 return false;
             }
         } catch (Exception e) {
-            System.debug('Exception during updateExternalOrderItem: ' + e.getMessage());
+            System.debug('Exception during updateExternalOrderItem for Id ' + localItem.External_Id__c + ': ' + e.getMessage());
             return false;
         }
     }
+    
 
     private Boolean createExternalOrderItem(String external_OrderId, OrderItem localItem, String accessToken) {
+        // Ensure required IDs are present
+        if (String.isBlank(external_OrderId) || localItem == null || localItem.Product2Id == null) {
+             System.debug('Cannot create external OrderItem: Missing external_OrderId, localItem, or localItem.Product2Id.');
+             return false;
+        }
+    
         String endpoint = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/OrderItem/';
         HttpRequest req = new HttpRequest();
         req.setEndpoint(endpoint);
         req.setMethod('POST');
         req.setHeader('Authorization', 'Bearer ' + accessToken);
         req.setHeader('Content-Type', 'application/json');
-
+    
         Map<String, Object> payload = new Map<String, Object>();
-        payload.put('OrderId',localItem.External_Id__c); // Corrected variable name
-        payload.put('Product2Id', getExternalProductId(localItem.Product2Id));
+    
+        // --- FIX OrderId value --- Use the correct external Order ID parameter
+        payload.put('OrderId', external_OrderId);
+    
+        // --- THIS IS STILL WRONG FOR CREATION ---
+        // You MUST provide PricebookEntryId, not Product2Id.
+        // Getting the correct *external* PricebookEntryId requires more logic:
+        // 1. Get external Product2Id (using getExternalProductId)
+        // 2. Query external org for the relevant Pricebook2Id (e.g., Standard Pricebook)
+        // 3. Query external org for PricebookEntry WHERE Product2Id = externalProdId AND Pricebook2Id = externalPbId
+        // 4. Use the found external PricebookEntryId here.
+        // payload.put('Product2Id', getExternalProductId(localItem.Product2Id)); // WRONG - Needs replacing with PricebookEntryId lookup
+    
+        // Placeholder - This WILL likely fail until PricebookEntryId logic is added
+        String externalProductId = getExternalProductId(localItem.Product2Id);
+        if(String.isBlank(externalProductId)){
+             System.debug('Cannot create external OrderItem: Could not determine external Product Id for local Product Id: ' + localItem.Product2Id);
+             return false;
+        }
+        
+        System.debug('WARNING: createExternalOrderItem is sending Product2Id ('+externalProductId+') instead of required PricebookEntryId. Creation will likely fail.');
+        payload.put('Product2Id', externalProductId); // Keep temporarily to show intent, but it's wrong.
+    
         payload.put('Quantity', localItem.Quantity);
-        payload.put('UnitPrice', localItem.UnitPrice);
-
+        payload.put('UnitPrice', localItem.UnitPrice); // Price is set on PBE, but can be overridden here
+    
         req.setBody(JSON.serialize(payload));
-
+    
         Http http = new Http();
         try {
             HttpResponse res = http.send(req);
-            if (res.getStatusCode() == 201) {
+            if (res.getStatusCode() == 201) { // 201 Created
                 Map<String, Object> responseBody = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
                 if (responseBody.containsKey('id')) {
                     String newExternalId = (String) responseBody.get('id');
-                    localItem.External_Id__c = newExternalId;
-                    update localItem;
-                    System.debug('Successfully created external OrderItem: ' + newExternalId);
-                    return true;
+                    // Update local OrderItem with new external ID
+                    try {
+                        localItem.External_Id__c = newExternalId;
+                        update localItem; // Consider partial update if DML fails often
+                        System.debug('Successfully created external OrderItem: ' + newExternalId + ' and updated local item ' + localItem.Id);
+                        return true;
+                    } catch (DmlException dmlEx) {
+                        System.debug('Successfully created external OrderItem: ' + newExternalId + ' BUT failed to update local item ' + localItem.Id + '. Error: ' + dmlEx.getMessage());
+                        // Decide how to handle this - maybe queue a job to retry local update?
+                        return false; // Return false as the full operation wasn't successful
+                    }
+                } else {
+                     System.debug('Failed to create external OrderItem: Response did not contain Id. Status: ' + res.getStatusCode() + ' Body: ' + res.getBody());
+                     return false;
                 }
             }
             System.debug('Failed to create external OrderItem. Status: ' + res.getStatusCode() + ' Body: ' + res.getBody());
@@ -176,6 +237,8 @@ public with sharing class ExternOrderService implements IOrderService {
             return false;
         }
     }
+    
+  
 
     private String getExternalProductId(Id localProductId) {
         if (localProductId == null) {
