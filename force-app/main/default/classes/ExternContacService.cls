@@ -25,7 +25,7 @@ public with sharing class ExternContacService  {
 
         HttpRequest authRequest = new HttpRequest();
         authRequest.setEndpoint(AUTH_URL);
-        authRequest.setMethod('POST');
+        authRequest.setMethod('POST');  
         authRequest.setHeader('Content-Type', 'application/x-www-form-urlencoded');
         authRequest.setBody(
             'grant_type=password' +

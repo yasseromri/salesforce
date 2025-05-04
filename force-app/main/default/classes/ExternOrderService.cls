@@ -270,8 +270,7 @@ public with sharing class ExternOrderService implements IOrderService {
         Map<String, Object> payload = new Map<String, Object>();
         payload.put('OrderId', external_OrderId);
     
-        // --- TODO: CRITICAL FIX NEEDED HERE ---
-        // Replace Product2Id with PricebookEntryId lookup in the external org
+      
         String externalProductId = getExternalProductId(localItem.Product2Id);
         if(String.isBlank(externalProductId)){
              System.debug('Cannot create external OrderItem: Could not determine external Product Id for local Product Id: ' + localItem.Product2Id);
@@ -283,22 +282,19 @@ public with sharing class ExternOrderService implements IOrderService {
              return false;
          }
          payload.put('PricebookEntryId', externalPricebookEntryId);
-        // System.debug('WARNING: createExternalOrderItem is sending Product2Id ('+externalProductId+') instead of required PricebookEntryId. Creation will likely fail.');
-        // payload.put('Product2Id', externalProductId); // REMOVE THIS LINE
-    
         payload.put('Quantity', localItem.Quantity);
-        payload.put('UnitPrice', localItem.UnitPrice); // Price is set on PBE, but can be overridden here
+        payload.put('UnitPrice', localItem.UnitPrice);
     
         req.setBody(JSON.serialize(payload));
     
         Http http = new Http();
         try {
             HttpResponse res = http.send(req);
-            if (res.getStatusCode() == 201) { // 201 Created
+            if (res.getStatusCode() == 201) { 
                 Map<String, Object> responseBody = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
                 if (responseBody.containsKey('id')) {
                     String newExternalId = (String) responseBody.get('id');
-                    // Update local OrderItem with new external ID
+                    
                     try {
                         // Use Database.update for partial success possibility if needed
                         OrderItem itemToUpdate = new OrderItem(Id = localItem.Id, External_Id__c = newExternalId);
