@@ -1,11 +1,100 @@
 public with sharing class omri {
     
-    private static final String AUTH_URL = 'https://login.salesforce.com/services/oauth2/token';
+    private static final String AUTH_URL ='https://login.salesforce.com/services/oauth2/token';
     private static final String EXTERNAL_INSTANCE_URL = 'https://pwcsandbox53-dev-ed.develop.my.salesforce.com';
     private static final String API_VERSION = 'v63.0';
     private static final String ACCOUNT_ENDPOINT = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/Account/';
     private static final String CONTACT_ENDPOINT = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/Contact/';
     private static final String PRODUCT_ENDPOINT = EXTERNAL_INSTANCE_URL + '/services/data/v62.0/sobjects/Product2/';
+
+    public enum RefundStatus {
+        NoRefund,
+        Refund,
+        HalfRefund,
+        Exchange
+    }
+
+    public Boolean refund_status(String externalOrderId, String refundStatus) {
+        if (String.isBlank(externalOrderId)) {
+            System.debug('refund_status: externalOrderId is blank.');
+            return false;
+        }
+        if (String.isBlank(refundStatus)) {
+            System.debug('refund_status: refundStatus is blank.');
+            return false;
+        }
+
+        // Use the input refundStatus string directly, unless overridden by date logic.
+        String statusToSend = refundStatus;
+        
+        String accessToken = authenticate();
+        if (accessToken == null) {
+            System.debug('refund_status: Authentication failed.');
+            return false;
+        }
+
+        String orderJson = getExternalRecordJsonById(EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/Order/', externalOrderId, accessToken);
+        if (String.isBlank(orderJson)) {
+            System.debug('refund_status: Failed to fetch order JSON for Id: ' + externalOrderId);
+            return false;
+        }
+
+        Map<String, Object> orderData;
+        try {
+            orderData = (Map<String, Object>) JSON.deserializeUntyped(orderJson);
+        } catch (Exception e) {
+            System.debug('refund_status: Failed to deserialize order JSON: ' + e.getMessage());
+            return false;
+        }
+
+        if (!orderData.containsKey('EffectiveDate') || orderData.get('EffectiveDate') == null) {
+            System.debug('refund_status: Order JSON missing EffectiveDate.');
+            return false;
+        }
+
+        String effectiveDateStr = (String) orderData.get('EffectiveDate');
+        Date effectiveDate;
+        try {
+            effectiveDate = Date.valueOf(effectiveDateStr);
+        } catch (Exception e) {
+            System.debug('refund_status: Failed to parse EffectiveDate: ' + effectiveDateStr);
+            return false;
+        }
+
+        Date twoMonthsAgo = Date.today().addMonths(-2);
+        if (effectiveDate <= twoMonthsAgo) {
+            statusToSend = omri.RefundStatus.NoRefund.name(); // Override to "NoRefund"
+        }
+
+        // Prepare PATCH request to update Refund_Status__c field
+        Map<String, Object> updateFields = new Map<String, Object>();
+        updateFields.put('Refund_Status__c', statusToSend);
+
+        String patchEndpoint = EXTERNAL_INSTANCE_URL + '/services/data/' + API_VERSION + '/sobjects/Order/' + externalOrderId;
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint(patchEndpoint);
+        req.setMethod('PATCH');
+        req.setHeader('Authorization', 'Bearer ' + accessToken);
+        req.setHeader('Content-Type', 'application/json');
+        req.setBody(JSON.serialize(updateFields));
+
+        Http http = new Http();
+        HttpResponse res;
+        try {
+            res = http.send(req);
+        } catch (System.CalloutException ce) {
+            System.debug('refund_status: Callout failed: ' + ce.getMessage());
+            return false;
+        }
+
+        if (res.getStatusCode() == 204) {
+            System.debug('refund_status: Successfully updated Refund_Status__c to ' + statusToSend + ' for order ' + externalOrderId);
+            return true;
+        } else {
+            System.debug('refund_status: Failed to update Refund_Status__c. Status: ' + res.getStatusCode() + ' Body: ' + res.getBody());
+            return false;
+        }
+    }
 
     public void getOrdersByEmailFromExternal(String email) {
         if (String.isBlank(email)) {
@@ -240,7 +329,7 @@ public with sharing class omri {
         }
     }
 
-    private String authenticate() {
+    public String authenticate() {
         HttpRequest req = new HttpRequest();
         req.setEndpoint(AUTH_URL);
         req.setMethod('POST');
